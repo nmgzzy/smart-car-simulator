@@ -1,0 +1,8 @@
+{
+  "name": "默认小车",
+  "max_speed": 200.0,
+  "acceleration": 160.0,
+  "friction": 2.0,
+  "wheelbase": 30.0,
+  "max_steer_angle": 35.0
+}

@@ -1,0 +1,8 @@
+{
+  "name": "灵活小车",
+  "max_speed": 180.0,
+  "acceleration": 140.0,
+  "friction": 2.2,
+  "wheelbase": 22.0,
+  "max_steer_angle": 45.0
+}
