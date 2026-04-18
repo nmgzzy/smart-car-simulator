@@ -17,8 +17,8 @@ class CameraSensor:
                  resolution: tuple = (160, 120),
                  near_dist: float = 10.0,
                  far_dist: float = 200.0,
-                 near_half_width: float = 50.0,
-                 far_half_width: float = 120.0):
+                 near_half_width: float = 23.0,
+                 far_half_width: float = 346.0):
         """
         Parameters
         ----------

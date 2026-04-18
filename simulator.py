@@ -8,6 +8,8 @@ simulator.py  —— 主仿真循环与 Pygame 可视化
 """
 
 import math
+import threading
+import time
 import numpy as np
 import cv2
 import pygame
@@ -29,10 +31,22 @@ COLOR_YELLOW  = (240, 200, 40)
 COLOR_RED     = (240, 60, 60)
 
 
+class _PressedKeys:
+    """供 KeyboardController 使用的按键状态适配器"""
+
+    def __init__(self, pressed_keys: set[int]):
+        self._pressed_keys = pressed_keys
+
+    def __getitem__(self, key: int) -> bool:
+        return key in self._pressed_keys
+
+
 class Simulator:
     """小车模拟器主类"""
 
     FPS = 60
+    CONTROL_HZ = 100        # 控制与物理更新固定频率
+    CONTROL_DT = 1.0 / CONTROL_HZ
     PANEL_W = 300           # 右侧面板宽度
     CAM_DISPLAY_H = 200     # 摄像头画面显示高度
 
@@ -55,6 +69,10 @@ class Simulator:
         self.controllers = controllers
         self.ctrl_idx = 0
         self.paused = False
+        self.latest_camera_image = None
+        self.latest_surface_grip = 1.0
+        self._pressed_keys = set()
+        self._state_lock = threading.Lock()
 
         # 计算窗口尺寸
         if window_size is None:
@@ -90,6 +108,14 @@ class Simulator:
         sx = int(wx * self.scale + self.offset_x)
         sy = int(wy * self.scale + self.offset_y)
         return sx, sy
+
+    def _estimate_surface_grip(self) -> float:
+        """基于车身多个采样点估算当前路面抓地比例."""
+        points = self.car.get_contact_points()
+        if not points:
+            return 0.0
+        on_count = sum(1 for px, py in points if self.track.is_on_track(px, py))
+        return on_count / len(points)
 
     # ---- Pygame 初始化 ----
 
@@ -131,7 +157,11 @@ class Simulator:
 
     # ---- 渲染 ----
 
-    def _render(self, camera_image: np.ndarray):
+    def _render(self, camera_image: np.ndarray,
+                car_x: float, car_y: float,
+                car_heading: float, car_speed: float,
+                ctrl_name: str,
+                surface_grip: float):
         self.screen.fill(COLOR_BG)
 
         # 1) 赛道
@@ -139,15 +169,15 @@ class Simulator:
                          (int(self.offset_x), int(self.offset_y)))
 
         # 2) 小车
-        sx, sy = self._to_screen(self.car.x, self.car.y)
-        angle_deg = -math.degrees(self.car.heading)
+        sx, sy = self._to_screen(car_x, car_y)
+        angle_deg = -math.degrees(car_heading)
         rotated = pygame.transform.rotate(self.car_surf, angle_deg)
         rect = rotated.get_rect(center=(sx, sy))
         self.screen.blit(rotated, rect)
 
         # 方向指示线
-        dx = int(20 * self.scale * math.cos(self.car.heading))
-        dy = int(20 * self.scale * math.sin(self.car.heading))
+        dx = int(20 * self.scale * math.cos(car_heading))
+        dy = int(20 * self.scale * math.sin(car_heading))
         pygame.draw.line(self.screen, COLOR_CAR_DIR,
                          (sx, sy), (sx + dx, sy + dy), 2)
 
@@ -175,22 +205,31 @@ class Simulator:
 
         # 5) 状态信息
         info_y = self.cam_disp_h + 50
-        self._draw_info(panel_x + 10, info_y)
+        self._draw_info(panel_x + 10, info_y, ctrl_name,
+                        car_x, car_y, car_heading, car_speed, surface_grip)
 
         pygame.display.flip()
 
-    def _draw_info(self, x, y):
+    def _draw_info(self, x, y, ctrl_name: str,
+                   car_x: float, car_y: float,
+                   car_heading: float, car_speed: float,
+                   surface_grip: float):
         """绘制状态文本"""
-        ctrl_name = type(self.controller).__name__
-        on = self.track.is_on_track(self.car.x, self.car.y)
+        if surface_grip >= 0.99:
+            surface_label = "YES"
+        elif surface_grip <= 0.01:
+            surface_label = "NO"
+        else:
+            surface_label = "PARTIAL"
         lines = [
             f"Car: {self.car.config_name}",
             f"Controller: {ctrl_name}",
             "",
-            f"Speed: {self.car.speed:6.1f} px/s",
-            f"Heading: {math.degrees(self.car.heading):6.1f} deg",
-            f"Pos: ({self.car.x:.0f}, {self.car.y:.0f})",
-            f"On track: {'YES' if on else 'NO'}",
+            f"Speed: {car_speed:6.1f} px/s",
+            f"Heading: {math.degrees(car_heading):6.1f} deg",
+            f"Pos: ({car_x:.0f}, {car_y:.0f})",
+            f"On track: {surface_label}",
+            f"Grip: {surface_grip * 100:5.0f}%",
             "",
             "--- Controls ---",
             "Arrow/WASD: Drive",
@@ -206,8 +245,49 @@ class Simulator:
             color = COLOR_YELLOW if "PAUSED" in line else COLOR_TEXT
             if "NO" in line and "On track" in line:
                 color = COLOR_RED
+            elif "PARTIAL" in line and "On track" in line:
+                color = COLOR_YELLOW
             surf = self.font.render(line, True, color)
             self.screen.blit(surf, (x, y + i * 22))
+
+    def _control_loop(self, stop_event: threading.Event):
+        """独立控制线程: 固定 100Hz 执行采样/控制/物理更新"""
+        next_tick = time.perf_counter()
+        max_lag = self.CONTROL_DT * 5
+
+        while not stop_event.is_set():
+            now = time.perf_counter()
+            sleep_s = next_tick - now
+            if sleep_s > 0:
+                stop_event.wait(sleep_s)
+                continue
+
+            # 控制线程落后太多时直接对齐, 避免持续追赶导致抖动
+            if now - next_tick > max_lag:
+                next_tick = now
+
+            with self._state_lock:
+                if not self.paused:
+                    if isinstance(self.controller, KeyboardController):
+                        key_view = _PressedKeys(set(self._pressed_keys))
+                        self.controller.handle_keys(key_view)
+
+                    camera_image = self.sensor.capture(
+                        self.track.image,
+                        self.car.x, self.car.y, self.car.heading)
+                    throttle, steer = self.controller.control(
+                        camera_image, self.car.speed)
+
+                    surface_grip = self._estimate_surface_grip()
+                    self.car.update(
+                        throttle, steer, self.CONTROL_DT,
+                        on_track=surface_grip >= 0.5,
+                        surface_grip=surface_grip
+                    )
+                    self.latest_camera_image = camera_image
+                    self.latest_surface_grip = surface_grip
+
+            next_tick += self.CONTROL_DT
 
     # ---- 主循环 ----
 
@@ -215,48 +295,54 @@ class Simulator:
         """启动模拟器"""
         self._init_pygame()
         running = True
-        camera_image = None
+        stop_event = threading.Event()
+        control_thread = threading.Thread(
+            target=self._control_loop, args=(stop_event,), daemon=True)
+        control_thread.start()
 
         while running:
-            dt = self.clock.tick(self.FPS) / 1000.0
-            dt = min(dt, 0.05)  # 防止帧间隔过大
+            self.clock.tick(self.FPS)
 
             # 事件处理
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.KEYDOWN:
+                    with self._state_lock:
+                        self._pressed_keys.add(event.key)
                     if event.key == pygame.K_ESCAPE:
                         running = False
                     elif event.key == pygame.K_SPACE:
-                        self.paused = not self.paused
+                        with self._state_lock:
+                            self.paused = not self.paused
                     elif event.key == pygame.K_r:
-                        self.car.reset()
+                        with self._state_lock:
+                            self.car.reset()
                     elif event.key == pygame.K_TAB:
-                        self.ctrl_idx = (self.ctrl_idx + 1) % \
-                            len(self.controllers)
+                        with self._state_lock:
+                            self.ctrl_idx = (self.ctrl_idx + 1) % \
+                                len(self.controllers)
                         print(f"切换控制器: "
                               f"{type(self.controller).__name__}")
+                elif event.type == pygame.KEYUP:
+                    with self._state_lock:
+                        self._pressed_keys.discard(event.key)
 
-            if not self.paused:
-                # 键盘输入
-                keys = pygame.key.get_pressed()
-                if isinstance(self.controller, KeyboardController):
-                    self.controller.handle_keys(keys)
-
-                # 摄像头采集
-                camera_image = self.sensor.capture(
-                    self.track.image,
-                    self.car.x, self.car.y, self.car.heading)
-
-                # 控制决策
-                throttle, steer = self.controller.control(camera_image)
-
-                # 物理更新
-                on_track = self.track.is_on_track(self.car.x, self.car.y)
-                self.car.update(throttle, steer, dt, on_track)
+            with self._state_lock:
+                camera_image = self.latest_camera_image
+                car_x = self.car.x
+                car_y = self.car.y
+                car_heading = self.car.heading
+                car_speed = self.car.speed
+                ctrl_name = type(self.controller).__name__
+                surface_grip = self.latest_surface_grip
 
             # 渲染
-            self._render(camera_image)
+            self._render(
+                camera_image, car_x, car_y, car_heading,
+                car_speed, ctrl_name, surface_grip
+            )
 
+        stop_event.set()
+        control_thread.join(timeout=1.0)
         pygame.quit()

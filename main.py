@@ -3,7 +3,6 @@ main.py  —— 智能小车模拟系统入口
 
 用法:
     python main.py                          # 使用默认赛道 + 键盘控制
-    python main.py --generate --seed 123    # 先生成随机赛道再启动
     python main.py --controller linefollow  # 使用循线算法
     python main.py --track my_track.png     # 使用自定义赛道
 """
@@ -11,7 +10,6 @@ main.py  —— 智能小车模拟系统入口
 import argparse
 import os
 
-from track_generator import generate_track
 from track import Track
 from car import Car
 from sensor import CameraSensor
@@ -22,41 +20,23 @@ from config import CarConfig
 
 def main():
     ap = argparse.ArgumentParser(description="智能小车模拟系统")
-    ap.add_argument("--track", type=str, default="assets/track_default.png",
+    ap.add_argument("--track", type=str, default="assets/track.png",
                     help="赛道图片路径")
     ap.add_argument("--controller", type=str, default="keyboard",
                     choices=["keyboard", "linefollow"],
                     help="初始控制器类型")
-    ap.add_argument("--car-config", type=str, default=None,
+    ap.add_argument("--car", type=str, default="configs/default.json",
                     help="小车配置文件路径 (JSON 格式)")
-    ap.add_argument("--generate", action="store_true",
-                    help="启动前先生成随机赛道")
-    ap.add_argument("--seed", type=int, default=None,
-                    help="赛道生成随机种子")
-    ap.add_argument("--elements", type=int, default=12,
-                    help="赛道元素数量")
-    ap.add_argument("--track-width", type=int, default=80,
-                    help="赛道宽度 (像素)")
     args = ap.parse_args()
 
     track_path = args.track
 
-    # ---- 生成赛道 ----
-    if args.generate or not os.path.exists(track_path):
-        import cv2, math
-        print("正在生成随机赛道 ...")
-        os.makedirs(os.path.dirname(track_path) or ".", exist_ok=True)
-        img, info = generate_track(
-            num_elements=args.elements,
-            track_width=args.track_width,
-            seed=args.seed,
+    if not os.path.exists(track_path):
+        raise FileNotFoundError(
+            f"赛道文件不存在: {track_path}\n"
+            "请先使用 `python track_editor.py` 创建赛道，"
+            "或通过 `--track` 指定已存在的赛道 PNG。"
         )
-        cv2.imwrite(track_path, img)
-        info_path = track_path.replace(".png", "_info.txt")
-        with open(info_path, "w") as f:
-            f.write(f"{info[0]},{info[1]},{info[2]}\n")
-        print(f"赛道已生成: {track_path} "
-              f"({img.shape[1]}x{img.shape[0]})")
 
     # ---- 加载赛道 ----
     track = Track(track_path)
@@ -66,26 +46,47 @@ def main():
 
     # ---- 加载小车配置 ----
     car_config = None
-    if args.car_config:
+    if args.car:
         try:
-            car_config = CarConfig.from_file(args.car_config)
-            print(f"小车配置已加载: {car_config.name}")
-            print(f"  最大速度: {car_config.max_speed} px/s")
-            print(f"  加速度: {car_config.acceleration} px/s²")
-            print(f"  摩擦系数: {car_config.friction}")
-            print(f"  轴距: {car_config.wheelbase} px")
-            print(f"  最大转向角: {car_config.max_steer_angle}°")
+            car_config = CarConfig.from_file(args.car)
         except FileNotFoundError as e:
             print(f"警告: {e}")
             print("使用默认配置")
+    if car_config is None:
+        car_config = CarConfig.get_default()
+        print(f"使用默认小车配置: {car_config.name}")
     else:
-        print("使用默认小车配置")
+        print(f"小车配置已加载: {car_config.name}")
+
+    print(f"  最大速度: {car_config.max_speed} px/s")
+    print(f"  加速度: {car_config.acceleration} px/s²")
+    print(f"  纵向摩擦: {car_config.longitudinal_friction}")
+    print(f"  横向抓地: {car_config.lateral_grip}")
+    print(f"  轴距: {car_config.wheelbase} px")
+    print(f"  最大转向角: {car_config.max_steer_angle}°")
+    print(f"  车长: {car_config.car_length if car_config.car_length is not None else 'auto'} px")
+    print(f"  车宽: {car_config.car_width if car_config.car_width is not None else 'auto'} px")
+    print(f"  最大转向速度: {car_config.max_steer_speed}°/s")
+    print(f"  最大滑移角: {car_config.max_slip_angle}°")
+    print(f"  滑移建立速率: {car_config.slip_build_rate}")
+    print(f"  滑移衰减速率: {car_config.slip_decay_rate}")
+    print(f"  传感器分辨率: {car_config.sensor_resolution[0]}x{car_config.sensor_resolution[1]}")
+    print(f"  传感器近端距离: {car_config.sensor_near_dist} px")
+    print(f"  传感器远端距离: {car_config.sensor_far_dist} px")
+    print(f"  传感器近端半宽: {car_config.sensor_near_half_width} px")
+    print(f"  传感器远端半宽: {car_config.sensor_far_half_width} px")
 
     # ---- 创建小车 ----
     car = Car(track.start_x, track.start_y, track.start_heading, config=car_config)
 
     # ---- 创建传感器 ----
-    sensor = CameraSensor(resolution=(160, 120))
+    sensor = CameraSensor(
+        resolution=car_config.sensor_resolution,
+        near_dist=car_config.sensor_near_dist,
+        far_dist=car_config.sensor_far_dist,
+        near_half_width=car_config.sensor_near_half_width,
+        far_half_width=car_config.sensor_far_half_width,
+    )
 
     # ---- 创建控制器列表 ----
     controllers = [KeyboardController(), LineFollowController()]

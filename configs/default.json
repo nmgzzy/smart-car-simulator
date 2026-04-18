@@ -1,8 +1,20 @@
 {
-  "name": "默认小车",
-  "max_speed": 200.0,
-  "acceleration": 160.0,
-  "friction": 2.0,
-  "wheelbase": 30.0,
-  "max_steer_angle": 35.0
+  "name": "my_car",
+  "max_speed": 300.0,
+  "acceleration": 200.0,
+  "longitudinal_friction": 0.2,
+  "lateral_grip": 1.0,
+  "wheelbase": 20.0,
+  "max_steer_angle": 40.0,
+  "car_length": 30.0,
+  "car_width": 16.0,
+  "max_steer_speed": 220.0,
+  "max_slip_angle": 22.0,
+  "slip_build_rate": 8.0,
+  "slip_decay_rate": 5.0,
+  "sensor_resolution": [160, 120],
+  "sensor_near_dist": 10.0,
+  "sensor_far_dist": 200.0,
+  "sensor_near_half_width": 23.0,
+  "sensor_far_half_width": 346.0
 }

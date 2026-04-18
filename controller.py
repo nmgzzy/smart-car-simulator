@@ -22,18 +22,21 @@ except ImportError:
 class BaseController:
     """控制器抽象基类"""
 
-    def control(self, camera_image: np.ndarray) -> tuple:
+    def control(self, camera_image: np.ndarray, speed: float) -> tuple:
         """
-        根据摄像头图像决策.
+        根据摄像头图像和当前车速决策.
 
         Parameters
         ----------
         camera_image : np.ndarray (H, W), uint8, 灰度
+        speed : float
+            当前车速 (px/s)
 
         Returns
         -------
         (throttle, steer) : throttle ∈ [-1,1], steer ∈ [-1,1]
         """
+        _ = (camera_image, speed)
         raise NotImplementedError
 
 
@@ -57,7 +60,7 @@ class KeyboardController(BaseController):
         elif keys[pygame.K_RIGHT] or keys[pygame.K_d]:
             self._steer = 1.0
 
-    def control(self, camera_image: np.ndarray) -> tuple:
+    def control(self, camera_image: np.ndarray, speed: float) -> tuple:
         return self._throttle, self._steer
 
 
@@ -69,11 +72,14 @@ class LineFollowController(BaseController):
     以比例控制方式输出转向量.
     """
 
-    def __init__(self, kp: float = 1.0, base_throttle: float = 0.4):
+    def __init__(self, kp: float = 1.0,
+                 target_speed: float = 120.0,
+                 speed_kp: float = 0.02):
         self.kp = kp
-        self.base_throttle = base_throttle
+        self.target_speed = target_speed
+        self.speed_kp = speed_kp
 
-    def control(self, camera_image: np.ndarray) -> tuple:
+    def control(self, camera_image: np.ndarray, speed: float) -> tuple:
         h, w = camera_image.shape[:2]
 
         # 取图像下半部分 (近处道路) 做检测
@@ -92,6 +98,9 @@ class LineFollowController(BaseController):
         steer = self.kp * error
         steer = max(-1.0, min(1.0, steer))
 
-        # 弯道时适当减速
-        throttle = self.base_throttle * (1.0 - 0.5 * abs(error))
+        # 速度闭环: 弯道降低目标速度, 直道恢复
+        speed_scale = 1.0 - 0.5 * abs(error)
+        desired_speed = self.target_speed * max(0.35, speed_scale)
+        throttle = (desired_speed - speed) * self.speed_kp
+        throttle = max(-1.0, min(1.0, throttle))
         return throttle, steer
