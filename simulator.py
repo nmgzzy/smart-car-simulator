@@ -29,6 +29,11 @@ COLOR_PANEL   = (40, 40, 50)
 COLOR_GREEN   = (60, 220, 100)
 COLOR_YELLOW  = (240, 200, 40)
 COLOR_RED     = (240, 60, 60)
+COLOR_CAR_OUTLINE = (180, 30, 30)
+COLOR_CAR_WINDOW = (150, 210, 255)
+COLOR_CAR_WHEEL = (28, 28, 32)
+COLOR_CAR_LIGHT = (255, 245, 170)
+COLOR_CAR_TAIL = (255, 110, 110)
 
 
 class _PressedKeys:
@@ -130,8 +135,9 @@ class Simulator:
         # 预渲染赛道背景
         self._build_track_surface()
 
-        # 小车图标 (三角形)
-        self.car_size = max(8, int(30 * self.scale))
+        # 小车图标按车辆实际长宽缩放
+        self.car_length_px = max(14, int(self.car.car_length * self.scale))
+        self.car_width_px = max(8, int(self.car.car_width * self.scale))
         self._build_car_surface()
 
     def _build_track_surface(self):
@@ -149,11 +155,85 @@ class Simulator:
         self.track_surface = pygame.transform.scale(surf, (tw, th))
 
     def _build_car_surface(self):
-        """创建小车三角形图标"""
-        s = self.car_size
-        self.car_surf = pygame.Surface((s, s), pygame.SRCALPHA)
-        pts = [(s, s // 2), (0, 0), (0, s - 1)]
-        pygame.draw.polygon(self.car_surf, COLOR_CAR, pts)
+        """根据车辆长宽绘制俯视小车图标"""
+        length = self.car_length_px
+        width = self.car_width_px
+        wheel_len = max(4, int(length * 0.18))
+        wheel_w = max(3, int(width * 0.20))
+        margin_x = max(4, wheel_len // 2 + 2)
+        margin_y = max(4, wheel_w)
+        surf_w = length + margin_x * 2
+        surf_h = width + margin_y * 2
+        self.car_surf = pygame.Surface((surf_w, surf_h), pygame.SRCALPHA)
+
+        body_left = margin_x + max(1, int(length * 0.06))
+        body_top = margin_y
+        body_right = margin_x + length - max(1, int(length * 0.18))
+        body_rect = pygame.Rect(body_left, body_top,
+                                max(6, body_right - body_left), width)
+        nose_tip_x = margin_x + length - 1
+        center_y = surf_h // 2
+
+        rear_round = max(3, int(width * 0.32))
+        pygame.draw.rect(self.car_surf, COLOR_CAR, body_rect,
+                         border_radius=rear_round)
+        nose_pts = [
+            (body_right - 1, body_top),
+            (nose_tip_x, center_y),
+            (body_right - 1, body_top + width),
+        ]
+        pygame.draw.polygon(self.car_surf, COLOR_CAR, nose_pts)
+        pygame.draw.rect(self.car_surf, COLOR_CAR_OUTLINE, body_rect, width=1,
+                         border_radius=rear_round)
+        pygame.draw.polygon(self.car_surf, COLOR_CAR_OUTLINE, nose_pts, width=1)
+
+        cabin_left = body_left + max(2, int(body_rect.w * 0.22))
+        cabin_w = max(4, int(body_rect.w * 0.40))
+        cabin_h = max(4, int(width * 0.56))
+        cabin_top = body_top + (width - cabin_h) // 2
+        cabin_rect = pygame.Rect(cabin_left, cabin_top, cabin_w, cabin_h)
+        pygame.draw.rect(self.car_surf, COLOR_CAR_WINDOW, cabin_rect,
+                         border_radius=max(2, cabin_h // 3))
+
+        windshield = [
+            (cabin_rect.right - 1, cabin_rect.top + 1),
+            (body_right - max(2, int(length * 0.05)), body_top + max(2, int(width * 0.18))),
+            (body_right - max(2, int(length * 0.05)), body_top + width - max(2, int(width * 0.18))),
+            (cabin_rect.right - 1, cabin_rect.bottom - 1),
+        ]
+        pygame.draw.polygon(self.car_surf, COLOR_CAR_WINDOW, windshield)
+
+        wheel_color = COLOR_CAR_WHEEL
+        rear_axle_x = body_left + max(2, int(body_rect.w * 0.18))
+        front_axle_x = body_left + max(4, int(body_rect.w * 0.70))
+        wheel_y_top = body_top - wheel_w // 2
+        wheel_y_bottom = body_top + width - wheel_w // 2
+        for axle_x in (rear_axle_x, front_axle_x):
+            top_wheel = pygame.Rect(axle_x - wheel_len // 2, wheel_y_top,
+                                    wheel_len, wheel_w)
+            bottom_wheel = pygame.Rect(axle_x - wheel_len // 2, wheel_y_bottom,
+                                       wheel_len, wheel_w)
+            pygame.draw.rect(self.car_surf, wheel_color, top_wheel,
+                             border_radius=max(1, wheel_w // 2))
+            pygame.draw.rect(self.car_surf, wheel_color, bottom_wheel,
+                             border_radius=max(1, wheel_w // 2))
+
+        front_light_r = max(1, width // 10)
+        pygame.draw.circle(self.car_surf, COLOR_CAR_LIGHT,
+                           (nose_tip_x - max(2, front_light_r + 1),
+                            body_top + max(2, width // 4)),
+                           front_light_r)
+        pygame.draw.circle(self.car_surf, COLOR_CAR_LIGHT,
+                           (nose_tip_x - max(2, front_light_r + 1),
+                            body_top + width - max(2, width // 4)),
+                           front_light_r)
+        tail_x = body_left + max(1, int(body_rect.w * 0.08))
+        pygame.draw.line(self.car_surf, COLOR_CAR_TAIL,
+                         (tail_x, body_top + max(1, width // 4)),
+                         (tail_x, body_top + max(1, width // 2 - 1)), 2)
+        pygame.draw.line(self.car_surf, COLOR_CAR_TAIL,
+                         (tail_x, body_top + max(1, width // 2 + 1)),
+                         (tail_x, body_top + width - max(1, width // 4)), 2)
 
     # ---- 渲染 ----
 

@@ -43,22 +43,36 @@ class BaseController:
 class KeyboardController(BaseController):
     """键盘手动控制 (方向键)"""
 
-    def __init__(self):
+    def __init__(self,
+                 throttle_alpha: float = 0.2,
+                 steer_alpha: float = 0.15):
         self._throttle = 0.0
         self._steer = 0.0
+        self._target_throttle = 0.0
+        self._target_steer = 0.0
+        self._throttle_alpha = float(np.clip(throttle_alpha, 0.0, 1.0))
+        self._steer_alpha = float(np.clip(steer_alpha, 0.0, 1.0))
 
     def handle_keys(self, keys):
         """由 Simulator 每帧调用, 传入 pygame.key.get_pressed() 结果"""
-        self._throttle = 0.0
-        self._steer = 0.0
+        self._target_throttle = 0.0
+        self._target_steer = 0.0
         if keys[pygame.K_UP] or keys[pygame.K_w]:
-            self._throttle = 1.0
+            self._target_throttle = 1.0
         elif keys[pygame.K_DOWN] or keys[pygame.K_s]:
-            self._throttle = -1.0
+            self._target_throttle = -1.0
         if keys[pygame.K_LEFT] or keys[pygame.K_a]:
-            self._steer = -1.0
+            self._target_steer = -1.0
         elif keys[pygame.K_RIGHT] or keys[pygame.K_d]:
-            self._steer = 1.0
+            self._target_steer = 1.0
+
+        # 轻量低通滤波: 避免按键输入在 0 和 1 之间瞬间跳变过猛
+        self._throttle += (
+            self._target_throttle - self._throttle
+        ) * self._throttle_alpha
+        self._steer += (
+            self._target_steer - self._steer
+        ) * self._steer_alpha
 
     def control(self, camera_image: np.ndarray, speed: float) -> tuple:
         return self._throttle, self._steer
