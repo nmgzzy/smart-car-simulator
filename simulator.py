@@ -54,6 +54,10 @@ class Simulator:
     CONTROL_DT = 1.0 / CONTROL_HZ
     PANEL_W = 300           # 右侧面板宽度
     CAM_DISPLAY_H = 200     # 摄像头画面显示高度
+    INFO_LINE_H = 22
+    INFO_SCROLL_STEP = 4 * INFO_LINE_H
+    TRAIL_MIN_DIST = 4.0
+    TRAIL_LINE_W = 2
 
     def __init__(self, track: Track, car: Car,
                  sensor: CameraSensor,
@@ -78,6 +82,9 @@ class Simulator:
         self.latest_surface_grip = 1.0
         self._pressed_keys = set()
         self._state_lock = threading.Lock()
+        self.info_scroll_offset = 0
+        self.info_scroll_max = 0
+        self.trail_points = []
 
         # 计算窗口尺寸
         if window_size is None:
@@ -121,6 +128,46 @@ class Simulator:
             return 0.0
         on_count = sum(1 for px, py in points if self.track.is_on_track(px, py))
         return on_count / len(points)
+
+    def _clear_trail(self):
+        self.trail_points = []
+
+    def _speed_to_trail_color(self, speed: float) -> tuple[int, int, int]:
+        speed_ratio = 0.0
+        if self.car.max_speed > 1e-6:
+            speed_ratio = min(abs(speed) / self.car.max_speed, 1.0)
+
+        r = int(COLOR_GREEN[0] + (COLOR_RED[0] - COLOR_GREEN[0]) * speed_ratio)
+        g = int(COLOR_GREEN[1] + (COLOR_RED[1] - COLOR_GREEN[1]) * speed_ratio)
+        b = int(COLOR_GREEN[2] + (COLOR_RED[2] - COLOR_GREEN[2]) * speed_ratio)
+        return r, g, b
+
+    def _update_trail(self):
+        point = (self.car.x, self.car.y, self._speed_to_trail_color(self.car.speed))
+        if not self.trail_points:
+            self.trail_points.append(point)
+            return
+
+        last_x, last_y, _ = self.trail_points[-1]
+        dx = self.car.x - last_x
+        dy = self.car.y - last_y
+        if math.hypot(dx, dy) >= self.TRAIL_MIN_DIST:
+            self.trail_points.append(point)
+
+    def _draw_trail(self):
+        if len(self.trail_points) < 2:
+            return
+
+        for i in range(1, len(self.trail_points)):
+            x1, y1, color = self.trail_points[i - 1]
+            x2, y2, _ = self.trail_points[i]
+            pygame.draw.line(
+                self.screen,
+                color,
+                self._to_screen(x1, y1),
+                self._to_screen(x2, y2),
+                self.TRAIL_LINE_W,
+            )
 
     # ---- Pygame 初始化 ----
 
@@ -247,6 +294,7 @@ class Simulator:
         # 1) 赛道
         self.screen.blit(self.track_surface,
                          (int(self.offset_x), int(self.offset_y)))
+        self._draw_trail()
 
         # 2) 小车
         sx, sy = self._to_screen(car_x, car_y)
@@ -285,12 +333,19 @@ class Simulator:
 
         # 5) 状态信息
         info_y = self.cam_disp_h + 50
-        self._draw_info(panel_x + 10, info_y, ctrl_name,
-                        car_x, car_y, car_heading, car_speed, surface_grip)
+        info_h = self.win_h - info_y - 10
+        self._draw_info(panel_x + 10, info_y, self.PANEL_W - 20, info_h,
+                        ctrl_name, car_x, car_y, car_heading, car_speed,
+                        surface_grip)
 
         pygame.display.flip()
 
-    def _draw_info(self, x, y, ctrl_name: str,
+    def _scroll_info(self, delta: int):
+        self.info_scroll_offset = int(np.clip(
+            self.info_scroll_offset + delta, 0, self.info_scroll_max
+        ))
+
+    def _draw_info(self, x, y, width: int, height: int, ctrl_name: str,
                    car_x: float, car_y: float,
                    car_heading: float, car_speed: float,
                    surface_grip: float):
@@ -318,9 +373,25 @@ class Simulator:
             "Tab: Switch ctrl",
             "Esc: Quit",
         ]
+        debug_lines = self.controller.get_debug_lines()
+        tuning_help_lines = self.controller.get_tuning_help_lines()
+        if debug_lines:
+            lines.extend([""])
+            lines.extend(debug_lines)
+        if tuning_help_lines:
+            lines.extend(["", "--- Tuning ---"])
+            lines.extend(tuning_help_lines)
         if self.paused:
             lines.insert(0, "** PAUSED **")
 
+        content_h = len(lines) * self.INFO_LINE_H
+        self.info_scroll_max = max(0, content_h - height)
+        self.info_scroll_offset = min(self.info_scroll_offset,
+                                      self.info_scroll_max)
+
+        panel_rect = pygame.Rect(x, y, width, height)
+        old_clip = self.screen.get_clip()
+        self.screen.set_clip(panel_rect)
         for i, line in enumerate(lines):
             color = COLOR_YELLOW if "PAUSED" in line else COLOR_TEXT
             if "NO" in line and "On track" in line:
@@ -328,7 +399,23 @@ class Simulator:
             elif "PARTIAL" in line and "On track" in line:
                 color = COLOR_YELLOW
             surf = self.font.render(line, True, color)
-            self.screen.blit(surf, (x, y + i * 22))
+            line_y = y + i * self.INFO_LINE_H - self.info_scroll_offset
+            self.screen.blit(surf, (x, line_y))
+        self.screen.set_clip(old_clip)
+
+        if self.info_scroll_max > 0:
+            track_x = x + width - 6
+            track_rect = pygame.Rect(track_x, y, 4, height)
+            pygame.draw.rect(self.screen, (70, 70, 80), track_rect,
+                             border_radius=2)
+            thumb_h = max(24, int(height * height / content_h))
+            thumb_y = y + int(
+                (height - thumb_h) * self.info_scroll_offset /
+                self.info_scroll_max
+            )
+            thumb_rect = pygame.Rect(track_x, thumb_y, 4, thumb_h)
+            pygame.draw.rect(self.screen, COLOR_TEXT, thumb_rect,
+                             border_radius=2)
 
     def _control_loop(self, stop_event: threading.Event):
         """独立控制线程: 固定 100Hz 执行采样/控制/物理更新"""
@@ -364,6 +451,7 @@ class Simulator:
                         on_track=surface_grip >= 0.5,
                         surface_grip=surface_grip
                     )
+                    self._update_trail()
                     self.latest_camera_image = camera_image
                     self.latest_surface_grip = surface_grip
 
@@ -387,6 +475,9 @@ class Simulator:
             for event in pygame.event.get():
                 if event.type == pygame.QUIT:
                     running = False
+                elif event.type == pygame.MOUSEWHEEL:
+                    with self._state_lock:
+                        self._scroll_info(-event.y * self.INFO_SCROLL_STEP)
                 elif event.type == pygame.KEYDOWN:
                     with self._state_lock:
                         self._pressed_keys.add(event.key)
@@ -398,12 +489,30 @@ class Simulator:
                     elif event.key == pygame.K_r:
                         with self._state_lock:
                             self.car.reset()
+                            self._clear_trail()
                     elif event.key == pygame.K_TAB:
                         with self._state_lock:
                             self.ctrl_idx = (self.ctrl_idx + 1) % \
                                 len(self.controllers)
+                            self.info_scroll_offset = 0
                         print(f"切换控制器: "
                               f"{type(self.controller).__name__}")
+                    elif event.key == pygame.K_PAGEUP:
+                        with self._state_lock:
+                            self._scroll_info(-self.INFO_SCROLL_STEP)
+                    elif event.key == pygame.K_PAGEDOWN:
+                        with self._state_lock:
+                            self._scroll_info(self.INFO_SCROLL_STEP)
+                    elif event.key == pygame.K_HOME:
+                        with self._state_lock:
+                            self.info_scroll_offset = 0
+                    elif event.key == pygame.K_END:
+                        with self._state_lock:
+                            self.info_scroll_offset = self.info_scroll_max
+                    else:
+                        with self._state_lock:
+                            self.controller.handle_keydown(
+                                event.key, pygame.key.get_mods())
                 elif event.type == pygame.KEYUP:
                     with self._state_lock:
                         self._pressed_keys.discard(event.key)
